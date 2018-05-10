@@ -1,5 +1,10 @@
 # HTTP/2 Client Utility
+An utility written in Java that help you communicate with a ready HTTP/2 server.
 
+## Build and Install
+```
+mvn clean install
+```
 ## Usage
 ```java
 // Create a HTTP/2 client instance:
