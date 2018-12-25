@@ -3,48 +3,58 @@ An utility written in Java that help you communicate with a ready HTTP/2 server.
 
 ## Build and Install
 ```
-mvn clean install
+mvn clean install -Dmaven.test.skip=true
 ```
 ## Usage
+### High Leve API
 ```java
-// Create a HTTP/2 client instance:
-Http2Client client = new Http2Client();
+try (Client client = newClient()) {
 
-// Configure HTTP/2 connection properties through SETTINGS frame:
-byte[] cf = client.createConnectionPreface(new SettingsFrame(new TreeMap<SettingsRegistry, Integer>() {
-  {
-  put(SettingsRegistry.INITIAL_WINDOW_SIZE, 512);
-  }
-}));
+  Http2Request request = client.newRequestBuilder()
+      .post("/url/path/to/resource")
+      .entity(new Params()
+          .setTextParameter("name", "Alice")
+          .setTextParameter("age", "30")
+      .build();
 
-// Initiate a HTTP/2 connection:
-try (Connection conn = client.openConnection(StartBy.alpn, "localhost", 8443, cf)) {
+  Http2Response response = client.send(request);
+  System.out.println(response.getContent());
 
-  // Open a stream:
-  try (Stream stream = conn.newStream()) {
-
-  // Construct a HTTP/2 headers block:
-  Http2Headers headers = new Http2Headers("GET", "/testweb/echo?msg=hello", "localhost", "https");
-  headers.add("test-header1", "header1-value");
-  byte[] headerBlock = conn.encode(headers);
-
-  // Send a HTTP/2 HEADERS frame:
-  stream.headers(new HeadersFrame(stream.getId(), true, true, headerBlock));
-
-  // Print out the HTTP/2 response:
-  System.out.println(stream.getResponseFuture().get(2L, TimeUnit.SECONDS));
-
-  } catch (InterruptedException | ExecutionException | TimeoutException e) {
-  e.printStackTrace();
-  }
-  
-} catch (IOException e) {
-  System.out.println("Close connection failed: " + e);
-} catch (Http2StartingException e) {
-  System.out.println(e.getMessage());
+} catch (Exception e) {
   e.printStackTrace(System.out);
-} catch (ConnectionException e) {
-  System.out.println(e.GetError().name() + ":" + e.getMessage());
-  e.printStackTrace(System.out);
+}
+```
+### Low Level API
+```java
+ConnectionFactory cf = new ConnectionFactory();
+
+try (Connection conn = cf.create(StartBy.alpn, host, port)) {
+
+  try (Stream stream = connection.newStream()) {
+
+    byte[] data = ...
+
+    // Send HEADERS frame with POST method:
+    Http2Headers http2Headers = new Http2Headers(conn, "POST", path);
+    http2Headers.add("Content-Type", "application/x-www-form-urlencoded;charset=utf-8");
+    http2Headers.add(""Content-Length", data.length);
+
+    // Send HEADERS frame:
+    byte[] headerBlock = http2Headers.toHeaderBlock();
+    HeadersFrame headersFrame = new HeadersFrame(stream.getId(), false, true, headerBlock);
+    stream.headers(headersFrame);
+
+    // Send DATA frame:
+    DataFrame dataFrame = new DataFrame(stream.getId(), true, data);
+    stream.data(dataFrame);
+
+    // Check stream response:
+    Http2Response response = stream.getResponse();
+		System.out.println(response.getContent());
+
+    } catch (IOException | ConnectionException e) {
+      e.printStackTrace(System.out);
+    }
+  }
 }
 ```
