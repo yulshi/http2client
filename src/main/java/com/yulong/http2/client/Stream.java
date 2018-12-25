@@ -9,7 +9,6 @@ import java.util.function.Consumer;
 import com.yulong.http2.client.common.ErrorCodeRegistry;
 import com.yulong.http2.client.frame.ContinuationFrame;
 import com.yulong.http2.client.frame.DataFrame;
-import com.yulong.http2.client.frame.FrameHistory;
 import com.yulong.http2.client.frame.HeadersFrame;
 import com.yulong.http2.client.frame.PriorityFrame;
 import com.yulong.http2.client.frame.ResetFrame;
@@ -18,10 +17,6 @@ import com.yulong.http2.client.message.PushRequest;
 
 /**
  * An HTTP/2 Stream representation
- * 
- * @author yushi
- * @since Jan 11 2016
- *
  */
 public interface Stream extends Closeable {
 
@@ -127,11 +122,11 @@ public interface Stream extends Closeable {
 	public Future<Http2Response> getResponseFuture();
 
 	/**
-	 * Get all the received frames on the stream
+	 * Get the response of the stream in a blocking way.
 	 * 
-	 * @return
+	 * @return Http2Response
 	 */
-	public List<FrameHistory> allReceivedFrames();
+	public Http2Response getResponse() throws ConnectionException;
 
 	/**
 	 * If this stream is reset by peer, return the received RST_STREAM frame
@@ -153,5 +148,18 @@ public interface Stream extends Closeable {
 	 * @param ppl
 	 */
 	public void addPushRequestConsumer(Consumer<PushRequest> consumer);
+
+	/**
+	 * Add a consumer which will be called on receipt of DATA frame
+	 * 
+	 * @param dataFrame
+	 */
+	public void addDataFrameConsumer(Consumer<DataFrame> dataFrameConsumer);
+
+	/**
+	 * Add the default DataFrame Consumer that will send back WINDOW_UPDATE frame
+	 * 
+	 */
+	public void addDefaultDataFrameConsumer();
 
 }

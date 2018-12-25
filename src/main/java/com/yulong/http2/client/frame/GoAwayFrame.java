@@ -1,8 +1,8 @@
 package com.yulong.http2.client.frame;
 
-import static com.yulong.http2.client.frame.FrameType.GO_AWAY;
 import static com.yulong.http2.client.utils.Utils.bytes2String;
 import static com.yulong.http2.client.utils.Utils.string2Bytes;
+import static com.yulong.http2.client.frame.FrameType.GO_AWAY;
 
 import java.nio.ByteBuffer;
 

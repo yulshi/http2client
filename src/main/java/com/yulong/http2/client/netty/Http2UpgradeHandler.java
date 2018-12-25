@@ -1,13 +1,11 @@
 package com.yulong.http2.client.netty;
 
+import static com.yulong.http2.client.utils.Debug.debugUpgrade;
 import static com.yulong.http2.client.utils.LogUtil.log;
 import static com.yulong.http2.client.utils.Utils.bytes2String;
 import static com.yulong.http2.client.utils.Utils.toHexString;
 
 import java.util.List;
-
-import com.yulong.http2.client.Http2StartingException;
-import com.yulong.http2.client.message.Header;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -17,11 +15,11 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.util.CharsetUtil;
+import com.yulong.http2.client.Http2StartingException;
+import com.yulong.http2.client.message.Header;
 
 /**
  * A handler to send upgrade requst and analyze the response.
- * 
- * @author yushi
  */
 public class Http2UpgradeHandler extends ByteToMessageDecoder {
 
@@ -52,12 +50,11 @@ public class Http2UpgradeHandler extends ByteToMessageDecoder {
 
 	@Override
 	public void channelActive(ChannelHandlerContext ctx) throws Exception {
-		log("Upgrading ...");
 		final ChannelFuture f = ctx.writeAndFlush(encodeUpgradeRequest());
 		f.addListener(new ChannelFutureListener() {
 			@Override
 			public void operationComplete(ChannelFuture future) throws Exception {
-				log("Upgrade request is sent!");
+				//log("Upgrade request is sent!");
 			}
 		});
 		ctx.fireChannelActive();
@@ -96,7 +93,8 @@ public class Http2UpgradeHandler extends ByteToMessageDecoder {
 		byte[] responseAsBytes = new byte[index];
 		in.readBytes(responseAsBytes);
 		String responseAsString = bytes2String(responseAsBytes);
-		System.out.println(responseAsString);
+
+		debugUpgrade(responseAsString);
 
 		if (responseAsString.length() < 12) {
 			ctx.close();
@@ -143,7 +141,7 @@ public class Http2UpgradeHandler extends ByteToMessageDecoder {
 			sb.append(requestBody);
 		}
 
-		log(sb.toString());
+		debugUpgrade(sb.toString());
 
 		return Unpooled.copiedBuffer(sb, CharsetUtil.UTF_8);
 

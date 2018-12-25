@@ -1,11 +1,20 @@
 package com.yulong.http2.client.netty;
 
+import static io.netty.buffer.Unpooled.buffer;
 import static com.yulong.http2.client.common.Constants.CONNECTION_STREAM_ID;
+import static com.yulong.http2.client.utils.Debug.debugPushRequest;
+import static com.yulong.http2.client.utils.Debug.debugResponseCache;
+import static com.yulong.http2.client.utils.Debug.debugResponseHeader;
 import static com.yulong.http2.client.utils.LogUtil.log;
 import static com.yulong.http2.client.utils.Utils.combine;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -14,14 +23,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
+import io.netty.buffer.ByteBuf;
 import com.yulong.http2.client.Connection;
 import com.yulong.http2.client.ConnectionException;
 import com.yulong.http2.client.Stream;
 import com.yulong.http2.client.StreamException;
 import com.yulong.http2.client.common.ErrorCodeRegistry;
+import com.yulong.http2.client.common.FlowControlWindow;
 import com.yulong.http2.client.frame.ContinuationFrame;
 import com.yulong.http2.client.frame.DataFrame;
 import com.yulong.http2.client.frame.Frame;
@@ -37,35 +48,38 @@ import com.yulong.http2.client.message.PushRequest;
 
 /**
  * An HTTP/2 Stream representation
- * 
- * @author yushi
- * @since Jan 11 2016
- *
  */
 public class NettyStream implements Stream {
 
 	private final Http2FrameHandler connection;
 	private final int id;
-	private final AtomicReference<State> state;
+	private final StateWrapper state;
 
 	private NettyStream parentStream;
 	private final List<NettyStream> dependentStreams;
 	private int weight;
 
-	private final AtomicReference<ResetFrame> receivedResetFrame = new AtomicReference<>();
-
 	private byte[] receivedHeaderBlock;
-	private byte[] receivedData;
 
-	private Http2Response response;
+	private ByteBuf dataBuffer = buffer(13684);
 
-	private final List<FrameHistory> allReceivedFrames;
+	private Http2ResponseImpl response;
+
+	private FrameHistory lastReceivedNonControlFrame;
+	private ResetFrame receivedResetFrame;
+
 	private final ExecutorService executorService;
 
 	private Stream currentPromisedStream;
 	private PushPromiseFrame currentPushPromiseFrame;
 	private final Map<PushRequest, Stream> promisedStreams;
 	private final List<Consumer<PushRequest>> pushRequestConsumers;
+	private final List<Consumer<DataFrame>> dataFrameConsumers;
+	private final FlowControlWindow window;
+
+	private Path cacheFile;
+	private OutputStream cacheOutputStream;
+	private final int cacheThreshold = Integer.getInteger("http2.response.cache.threshold", 65535);
 
 	NettyStream(Http2FrameHandler connection, int id) {
 		this(connection, id, State.IDLE);
@@ -76,23 +90,20 @@ public class NettyStream implements Stream {
 		// Coalition:
 		this.connection = connection;
 		this.id = id;
-		this.state = new AtomicReference<>(state);
+		this.state = new StateWrapper(state);
 
 		// Dependencies and priority:
 		if (id == CONNECTION_STREAM_ID) {
 			this.parentStream = null;
 		} else {
 			this.parentStream = connection.getConnectionStream();
-			this.parentStream.dependentStreams.add(this);
+			//this.parentStream.dependentStreams.add(this);
 		}
 		this.dependentStreams = new ArrayList<NettyStream>();
 		this.weight = 16;
 
 		// Responses:
 		this.receivedHeaderBlock = new byte[0];
-		this.receivedData = new byte[0];
-
-		this.allReceivedFrames = new ArrayList<>();
 
 		executorService = Executors.newCachedThreadPool(new ThreadFactory() {
 			@Override
@@ -105,6 +116,8 @@ public class NettyStream implements Stream {
 
 		promisedStreams = new HashMap<>();
 		pushRequestConsumers = new ArrayList<>();
+		dataFrameConsumers = new ArrayList<>();
+		window = new FlowControlWindow(id, this.connection.currentSettings().getInitialWindowSize());
 
 	}
 
@@ -206,7 +219,42 @@ public class NettyStream implements Stream {
 	@Override
 	public void data(DataFrame dataFrame) throws ConnectionException {
 
-		connection.send(dataFrame);
+		int length = dataFrame.getPayloadLength();
+
+		if (dataFrame.isPadded()) {
+
+			Math.min(window.availableSize(length), connection.getWindow().availableSize(length));
+			window.consume(length);
+			connection.getWindow().consume(length);
+			connection.send(dataFrame);
+
+		} else {
+
+			byte[] data = dataFrame.getData();
+			boolean endStreamFlag = dataFrame.isEndStream();
+
+			int sizeAvailable = Math.min(window.availableSize(1), connection.getWindow().availableSize(1));
+
+			if (sizeAvailable >= length) {
+
+				window.consume(length);
+				connection.getWindow().consume(length);
+				connection.send(dataFrame);
+
+			} else {
+
+				window.consume(sizeAvailable);
+				connection.getWindow().consume(sizeAvailable);
+
+				// fragment the data frame:
+				connection.send(new DataFrame(getId(), false, Arrays.copyOfRange(data, 0, sizeAvailable)));
+
+				data(new DataFrame(getId(), endStreamFlag, Arrays.copyOfRange(data, sizeAvailable, length)));
+
+			}
+
+		}
+
 		if (dataFrame.isEndStream()) {
 			endStreamLocally();
 		}
@@ -273,8 +321,9 @@ public class NettyStream implements Stream {
 
 	@Override
 	public void close() {
-		log("---------- releasing resources occupied by the current stream: " + id + " ----------");
+		// log("---------- releasing resources occupied by the current stream: " + id + " ----------");
 		executorService.shutdown();
+		drain();
 	}
 
 	// ///////////////////////////////////////////////////////////////////////////
@@ -300,13 +349,61 @@ public class NettyStream implements Stream {
 	}
 
 	/**
-	 * Get all the received frames on the stream
+	 * Get the response of the stream in the blocking way.
 	 * 
 	 * @return
+	 * @throws TimeoutException
 	 */
-	@Override
-	public List<FrameHistory> allReceivedFrames() {
-		return Collections.unmodifiableList(this.allReceivedFrames);
+	public Http2Response getResponse() throws ConnectionException {
+
+		int idleTimeoutSeconds = Integer.getInteger("http2.response.timeout", 300);
+		// log("Start waiting for the response (idle timeout in seconds: " + idleTimeoutSeconds + ") ...");
+
+		String failReason = null;
+		long timeElapsed = -1;
+
+		long start = System.currentTimeMillis();
+
+		while (response == null || !response.isComplete()) {
+
+			// Check frame history to see if the idle time of the stream is larger than 300 seconds,
+			// if so, stop waiting:
+			if (lastReceivedNonControlFrame != null) {
+				timeElapsed = System.currentTimeMillis() - lastReceivedNonControlFrame.getTimestamp();
+				if (timeElapsed > idleTimeoutSeconds * 1000) {
+					failReason = "Failed to get response after " + timeElapsed
+							+ " milliseconds, the last received non-control frame is " + lastReceivedNonControlFrame;
+					break;
+				}
+			} else {
+				timeElapsed = System.currentTimeMillis() - start;
+				if (timeElapsed > idleTimeoutSeconds * 1000) {
+					failReason = "Failed to get response after " + timeElapsed
+							+ " milliseconds, no any non-control frame were received";
+					break;
+				}
+			}
+
+			// If a RST_STREAM frame is received, stop waiting immediately:
+			if (receivedResetFrame != null) {
+				failReason = "Failed to get response because RST_STREAM is received";
+				break;
+			}
+
+			try {
+				Thread.sleep(100);
+			} catch (InterruptedException e) {
+			}
+
+		}
+
+		//return responseComplete ? response : null;
+		if (failReason == null) {
+			return response;
+		} else {
+			throw new ConnectionException(ErrorCodeRegistry.UNKNOWN, failReason);
+		}
+
 	}
 
 	/**
@@ -316,7 +413,7 @@ public class NettyStream implements Stream {
 	 */
 	@Override
 	public ResetFrame resetByPeer() {
-		return receivedResetFrame.get();
+		return receivedResetFrame;
 	}
 
 	/**
@@ -337,6 +434,34 @@ public class NettyStream implements Stream {
 	@Override
 	public void addPushRequestConsumer(Consumer<PushRequest> consumer) {
 		pushRequestConsumers.add(consumer);
+	}
+
+	/**
+	 * Add a consumer which will be called on receipt of DATA frame
+	 * 
+	 * @param dataFrame
+	 */
+	@Override
+	public void addDataFrameConsumer(Consumer<DataFrame> dataFrameConsumer) {
+		dataFrameConsumers.add(dataFrameConsumer);
+	}
+
+	/**
+	 * Add the default DataFrame Consumer that will send back WINDOW_UPDATE frame
+	 */
+	@Override
+	public void addDefaultDataFrameConsumer() {
+		addDataFrameConsumer(dataFrame -> {
+			int dataLength = dataFrame.getPayloadLength();
+			if (dataLength > 0) {
+				try {
+					this.windowUpdate(dataLength);
+					this.getConnection().windowUpdate(dataLength);
+				} catch (ConnectionException e) {
+					log("Failed to send WINDOW_UPDATE frame: " + e);
+				}
+			}
+		});
 	}
 
 	/**
@@ -397,12 +522,63 @@ public class NettyStream implements Stream {
 	 */
 	void onData(DataFrame dataFrame) {
 
-		receivedData = combine(receivedData, dataFrame.getData());
+		dataBuffer.writeBytes(dataFrame.getData());
+
+		int receivedDataLength = dataBuffer.readableBytes();
+
+		if (receivedDataLength > cacheThreshold) {
+			if (cacheFile == null) {
+				// create cache file if required:
+				try {
+					String tempDir = System.getProperty("http2.response.cache.dir");
+					if (tempDir == null) {
+						tempDir = System.getProperty("java.io.tmpdir");
+					}
+					String prefix = "http2-cache-" + this.getConnection().hashCode() + "-";
+					String suffix = "-" + this.getId();
+					cacheFile = Files.createTempFile(Paths.get(tempDir), prefix, suffix);
+					cacheOutputStream = Files.newOutputStream(cacheFile);
+				} catch (IOException e) {
+					System.out.println("Unable to create cache file: " + e);
+					cacheFile = null;
+				}
+			} else {
+				// cache content to file if required:
+				debugResponseCache(() -> "Starting to cache content to file: " + receivedDataLength);
+				try {
+					dataBuffer.readBytes(cacheOutputStream, receivedDataLength);
+					dataBuffer.clear();
+					response.cacheFile(cacheFile);
+				} catch (IOException e) {
+					System.out.println("Unable to cache DATA to cache file (" + cacheFile + ") due to " + e);
+					cacheFile = null; // disable cache
+					if (cacheOutputStream != null) {
+						try {
+							cacheOutputStream.close();
+						} catch (IOException ioe) {
+							log("Error closing cache file output stream: " + ioe);
+						}
+					}
+				}
+			}
+		}
+
+		for (Consumer<DataFrame> dataFrameConsumer : dataFrameConsumers) {
+			dataFrameConsumer.accept(dataFrame);
+		}
 
 		if (dataFrame.isEndStream()) {
 			endStreamRemotely();
-			response.setEntity(receivedData);
+			debugResponseCache(() -> "data not cached: " + receivedDataLength);
+			writeResponseEntity();
 			response.setComplete(true);
+			if (cacheOutputStream != null) {
+				try {
+					cacheOutputStream.close();
+				} catch (IOException ioe) {
+					log("Error closing cache file output stream: " + ioe);
+				}
+			}
 		}
 
 	}
@@ -424,10 +600,15 @@ public class NettyStream implements Stream {
 	 */
 	void onWindowUpdate(WindowUpdateFrame windowUpdateFrame) throws StreamException {
 
-		if (windowUpdateFrame.getWindowSizeIncrement() <= 0) {
+		int increment = windowUpdateFrame.getWindowSizeIncrement();
+		if (increment <= 0) {
 			throw new StreamException(id, ErrorCodeRegistry.PROTOCOL_ERROR,
 					"The flow-control window increment should not be 0 or negative: "
 							+ windowUpdateFrame.getWindowSizeIncrement());
+		}
+
+		if (!window.increment(increment)) {
+			reset(ErrorCodeRegistry.FLOW_CONTROL_ERROR);
 		}
 
 	}
@@ -458,7 +639,7 @@ public class NettyStream implements Stream {
 	 * @param resetFrame
 	 */
 	void onReset(ResetFrame resetFrame) {
-		this.receivedResetFrame.set(resetFrame);
+		this.receivedResetFrame = resetFrame;
 		state.set(State.RESET_REMOTE);
 	}
 
@@ -477,7 +658,25 @@ public class NettyStream implements Stream {
 	 * @param frame
 	 */
 	void addReceivedFrame(Frame frame) {
-		this.allReceivedFrames.add(new FrameHistory(frame));
+		switch (frame.getType()) {
+		case HEADERS:
+		case CONTINUATION:
+		case DATA:
+		case PUSH_PROMISE:
+			lastReceivedNonControlFrame = new FrameHistory(frame);
+			break;
+		default:
+			break;
+		}
+	}
+
+	/**
+	 * expose the window to connection
+	 * 
+	 * @return
+	 */
+	FlowControlWindow getWindow() {
+		return window;
 	}
 
 	/**
@@ -530,8 +729,17 @@ public class NettyStream implements Stream {
 	private void processResponseHeaders() throws ConnectionException {
 
 		Http2Headers headers = connection.decode(receivedHeaderBlock);
-		// log(headers);
-		response = new Http2Response(headers);
+
+		debugResponseHeader(headers);
+
+		if (response == null) {
+			// Headers:
+			response = new Http2ResponseImpl(id, headers);
+		} else {
+			// Trailers:
+			writeResponseEntity();
+			response.trailers(headers);
+		}
 
 		if (state.get() == State.CLOSED) {
 			response.setComplete(true);
@@ -549,6 +757,8 @@ public class NettyStream implements Stream {
 
 		PushRequest pushRequest = new PushRequest(currentPushPromiseFrame.getStreamId(),
 				currentPushPromiseFrame.getPromisedStreamId(), connection.decode(receivedHeaderBlock));
+
+		debugPushRequest(pushRequest);
 
 		for (Consumer<PushRequest> consumer : pushRequestConsumers) {
 			consumer.accept(pushRequest);
@@ -581,24 +791,6 @@ public class NettyStream implements Stream {
 	private void prioritize(PriorityFrame priorityFrame) {
 		prioritize(connection.getStream(priorityFrame.getParentStreamId()), priorityFrame.isExclusive(),
 				priorityFrame.getWeight());
-	}
-
-	/**
-	 * Prioritize the current stream in the tree.
-	 * 
-	 * @param priorityFrame
-	 */
-	private void prioritize(NettyStream parentStream) {
-		prioritize(parentStream, false);
-	}
-
-	/**
-	 * Prioritize the current stream in the tree.
-	 * 
-	 * @param priorityFrame
-	 */
-	private void prioritize(NettyStream parentStream, boolean exclusive) {
-		prioritize(parentStream, exclusive, -1);
 	}
 
 	/**
@@ -647,53 +839,51 @@ public class NettyStream implements Stream {
 		}
 	}
 
-	public static void main(String[] args) {
+	private void writeResponseEntity() {
+		byte[] tmp = new byte[dataBuffer.readableBytes()];
+		dataBuffer.readBytes(tmp);
+		response.entity(tmp);
+	}
 
-		try (Connection dummy = new Http2FrameHandler(null, null)) {
-
-			NettyStream x = (NettyStream) dummy.getConnectionStream();
-			NettyStream a = (NettyStream) dummy.newStream();
-			NettyStream b = (NettyStream) dummy.newStream();
-			NettyStream c = (NettyStream) dummy.newStream();
-			NettyStream d = (NettyStream) dummy.newStream();
-			NettyStream e = (NettyStream) dummy.newStream();
-			NettyStream f = (NettyStream) dummy.newStream();
-
-			System.out.println(x);
-			System.out.println(a);
-			System.out.println(b);
-			System.out.println(c);
-			System.out.println(d);
-			System.out.println(e);
-			System.out.println(f);
-
-			System.out.println("---------------------");
-			b.prioritize(a);
-			c.prioritize(a);
-			d.prioritize(c);
-			e.prioritize(c, true);
-			f.prioritize(d);
-
-			System.out.println(x);
-			System.out.println(a);
-			System.out.println(b);
-			System.out.println(c);
-			System.out.println(d);
-			System.out.println(e);
-			System.out.println(f);
-
-			System.out.println("----------------------");
-			a.prioritize(d, true);
-			System.out.println(x);
-			System.out.println(a);
-			System.out.println(b);
-			System.out.println(c);
-			System.out.println(d);
-			System.out.println(e);
-			System.out.println(f);
-
-		} catch (IOException e1) {
-			e1.printStackTrace();
+	private void drain() {
+		if (connection.config().isDrainStreamOnClose()) {
+			//log("removed stream: " + this);
+			connection.streams().remove(id);
+			this.currentPromisedStream = null;
+			this.currentPushPromiseFrame = null;
+			this.dataBuffer = null;
+			this.receivedHeaderBlock = null;
+			this.receivedResetFrame = null;
 		}
 	}
+
+	private static class StateWrapper {
+
+		private State state;
+
+		public StateWrapper(State state) {
+			this.state = state;
+		}
+
+		public synchronized boolean compareAndSet(State expect, State update) {
+
+			if (expect == state) {
+				set(update);
+				return true;
+			} else {
+				return false;
+			}
+
+		}
+
+		public State get() {
+			return state;
+		}
+
+		public void set(State state) {
+			this.state = state;
+		}
+
+	}
+
 }

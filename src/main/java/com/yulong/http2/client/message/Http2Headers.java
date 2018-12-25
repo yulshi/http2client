@@ -1,37 +1,47 @@
 package com.yulong.http2.client.message;
 
+import static com.yulong.http2.client.utils.Utils.showPartOfTextIfTooLong;
+
 import java.util.ArrayList;
 import java.util.List;
 
+import com.yulong.http2.client.Connection;
+import com.yulong.http2.client.ConnectionException;
+
 /**
  * HTTP/2 headers
- * 
- * @author yushi
- * @since 12.2.2.1.0 Jan 11 2016
- *
  */
 public class Http2Headers {
 
 	private List<Header> headers;
+	private Connection connection;
 
-	public Http2Headers() {
-		this(null, null, null, null);
+	public Http2Headers(Connection connection) {
+		this(connection, null, null);
 	}
 
-	public Http2Headers(String method, String path, String authority, String scheme) {
+	public Http2Headers(Connection connection, String method, String path) {
 		this.headers = new ArrayList<Header>(16);
+		this.connection = connection;
 		if (method != null) {
 			add(PseudoHeader.METHOD.value(), method);
+			if (path != null) {
+				add(PseudoHeader.PATH.value(), System.getProperty("http2.path.prefix", "") + path);
+			}
+			add(PseudoHeader.AUTHORITY.value(), this.connection.getHost() + ":" + this.connection.getPort());
+			add(PseudoHeader.SCHEME.value(), this.connection.getScheme());
 		}
-		if (path != null) {
-			add(PseudoHeader.PATH.value(), path);
-		}
-		if (authority != null) {
-			add(PseudoHeader.AUTHORITY.value(), authority);
-		}
-		if (scheme != null) {
-			add(PseudoHeader.SCHEME.value(), scheme);
-		}
+	}
+
+	public byte[] toHeaderBlock() {
+		//		if (!contains("User-Agent")) {
+		//			add(new Header("User-Agent", "wlstest.http2.client/1.0"));
+		//		}
+		return connection.encode(this);
+	}
+
+	public static Http2Headers fromHeaderBlock(Connection connection, byte[] headerBlock) throws ConnectionException {
+		return connection.decode(headerBlock);
 	}
 
 	public void clear() {
@@ -148,7 +158,7 @@ public class Http2Headers {
 		StringBuilder desc = new StringBuilder();
 
 		for (Header header : headers) {
-			desc.append(header.getName() + ": " + header.getValue()).append("\r\n");
+			desc.append(header.getName() + ": " + showPartOfTextIfTooLong(header.getValue())).append("\r\n");
 		}
 
 		return desc.substring(0, desc.length() - 2);

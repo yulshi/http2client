@@ -1,20 +1,14 @@
 package com.yulong.http2.client;
 
 import java.io.Closeable;
-import java.util.Collection;
-import java.util.List;
-import java.util.concurrent.Future;
 
 import com.yulong.http2.client.common.ErrorCodeRegistry;
 import com.yulong.http2.client.common.Http2Settings;
 import com.yulong.http2.client.frame.Frame;
-import com.yulong.http2.client.frame.FrameHistory;
 import com.yulong.http2.client.frame.GoAwayFrame;
 import com.yulong.http2.client.frame.PingFrame;
 import com.yulong.http2.client.frame.SettingsFrame;
 import com.yulong.http2.client.message.Http2Headers;
-import com.yulong.http2.client.message.Http2Request;
-import com.yulong.http2.client.message.Http2Response;
 
 public interface Connection extends Closeable {
 
@@ -33,13 +27,6 @@ public interface Connection extends Closeable {
 	void send(Frame frame) throws ConnectionException;
 
 	/**
-	 * Get all the streams on this connection
-	 * 
-	 * @return all the streams on this connection
-	 */
-	Collection<? extends Stream> getStreams();
-
-	/**
 	 * Get the stream according to the given stream identifier
 	 * 
 	 * @param streamId
@@ -53,15 +40,6 @@ public interface Connection extends Closeable {
 	 * @return
 	 */
 	Stream getConnectionStream();
-
-	/**
-	 * Send a HTTP request on the connection
-	 * 
-	 * @param request
-	 * @return A future of Http2Response
-	 * @throws ConnectionException
-	 */
-	Future<Http2Response> request(Http2Request request) throws ConnectionException;
 
 	/**
 	 * Send a Settings frame and wait for the response Settings reply
@@ -130,22 +108,6 @@ public interface Connection extends Closeable {
 	byte[] encode(Http2Headers headers);
 
 	/**
-	 * Close all streams in the "idle" state that might have been initiated by
-	 * that peer with a lower-valued stream identifier.
-	 * 
-	 * @param streamId
-	 */
-	void closeUnusedIdleStreams(int streamId);
-
-	/**
-	 * Get all the received frames on the connection (excludes those whose
-	 * stream id is not 0)
-	 * 
-	 * @return
-	 */
-	List<FrameHistory> allReceivedFrames();
-
-	/**
 	 * Wait for the connection to be upgraded
 	 * 
 	 * @param timeout
@@ -160,5 +122,25 @@ public interface Connection extends Closeable {
 	 * @return GoAwayFrame
 	 */
 	GoAwayFrame closedByPeer();
+
+	/**
+	 * The host name the connection is connecting to
+	 * 
+	 * @return
+	 */
+	String getHost();
+
+	/**
+	 * The port number the connection is connecting to
+	 * @return
+	 */
+	int getPort();
+
+	/**
+	 * The scheme the connection is using
+	 * 
+	 * @return
+	 */
+	String getScheme();
 
 }

@@ -2,20 +2,18 @@ package com.yulong.http2.client.netty;
 
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.socket.SocketChannel;
+import com.yulong.http2.client.ConnectionConfig;
 
 /**
  * An template for an intializer
- * 
- * @author yushi
- *
  */
 public abstract class Http2Initializer extends ChannelInitializer<SocketChannel> {
 
 	protected Http2FrameHandler frameHandler;
-	protected final byte[] connectionPreface;
+	protected final ConnectionConfig config;
 
-	public Http2Initializer(byte[] connectionPreface) {
-		this.connectionPreface = connectionPreface;
+	public Http2Initializer(ConnectionConfig config) {
+		this.config = config;
 	}
 
 	@Override

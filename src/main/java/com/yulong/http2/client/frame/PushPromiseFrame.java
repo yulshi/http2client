@@ -4,10 +4,10 @@ import static com.yulong.http2.client.frame.FrameType.PUSH_PROMISE;
 import static com.yulong.http2.client.utils.Utils.combine;
 import static com.yulong.http2.client.utils.Utils.createBinaryData;
 import static com.yulong.http2.client.utils.Utils.fromInt;
+import static com.yulong.http2.client.utils.Utils.showPartOfTextIfTooLong;
+import static com.yulong.http2.client.utils.Utils.toHexString;
 
 import java.nio.ByteBuffer;
-
-import com.yulong.http2.client.utils.Utils;
 
 public class PushPromiseFrame extends Frame implements Continuable, Padded {
 
@@ -126,13 +126,14 @@ public class PushPromiseFrame extends Frame implements Continuable, Padded {
 			StringBuilder describe = new StringBuilder();
 			describe.append("Pad_Length=" + getPadLength()).append(keyValSep);
 			describe.append("Promised-Stream-ID=").append(promisedStreamId).append(keyValSep);
-			describe.append("Header-Block-Fragment=" + Utils.toHexString(getHeaderBlockFragment())).append(keyValSep);
-			describe.append("Padding=" + Utils.toHexString(getPadding()));
+			describe.append("Header-Block-Fragment=" + showPartOfTextIfTooLong(toHexString(getHeaderBlockFragment())));
+			describe.append(keyValSep);
+			describe.append("Padding=" + showPartOfTextIfTooLong(toHexString(getPadding())));
 			return describe.toString();
 		} else {
 			StringBuilder describe = new StringBuilder();
 			describe.append("Promised-Stream-ID=").append(promisedStreamId).append(keyValSep);
-			describe.append("Header-Block-Fragment=" + Utils.toHexString(getHeaderBlockFragment()));
+			describe.append("Header-Block-Fragment=" + showPartOfTextIfTooLong(toHexString(getHeaderBlockFragment())));
 			return describe.toString();
 		}
 

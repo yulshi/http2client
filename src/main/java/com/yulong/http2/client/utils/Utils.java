@@ -70,7 +70,12 @@ public final class Utils {
 		try {
 			res = new String(bytes, charset);
 		} catch (UnsupportedEncodingException e) {
-			e.printStackTrace();
+			System.out.println(e.toString() + "; Use utf-8 instead");
+			try {
+				res = new String(bytes, "utf-8");
+			} catch (UnsupportedEncodingException e1) {
+				e1.printStackTrace(System.out);
+			}
 		}
 		return res;
 	}
@@ -301,7 +306,11 @@ public final class Utils {
 	 * @return
 	 */
 	public static String showPartOfTextIfTooLong(String text) {
-		int length = 20;
+		int length = Integer.getInteger("http2.debug.maxlength", 40);
+		if (length <= 0) {
+			// If the value of http2.log.maxlength <=0, show the whole text:
+			return text;
+		}
 		if (text != null && text.length() > length) {
 			return text.substring(0, length) + "... (length:" + text.length() + ")";
 		} else {

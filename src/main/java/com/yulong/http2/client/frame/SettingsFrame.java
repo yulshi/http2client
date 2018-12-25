@@ -1,7 +1,10 @@
 package com.yulong.http2.client.frame;
 
+import static java.util.Base64.getUrlEncoder;
 import static com.yulong.http2.client.frame.FrameType.SETTINGS;
+import static com.yulong.http2.client.utils.Utils.bytes2String;
 import static com.yulong.http2.client.utils.Utils.combine;
+import static com.yulong.http2.client.utils.Utils.fromHexString;
 import static com.yulong.http2.client.utils.Utils.fromInt;
 import static com.yulong.http2.client.utils.Utils.toInt;
 
@@ -10,6 +13,7 @@ import java.util.Collections;
 import java.util.SortedMap;
 import java.util.TreeMap;
 
+import com.yulong.http2.client.common.Constants;
 import com.yulong.http2.client.common.SettingsRegistry;
 
 public final class SettingsFrame extends Frame {
@@ -95,6 +99,14 @@ public final class SettingsFrame extends Frame {
 
 	public SortedMap<SettingsRegistry, Integer> getSettings() {
 		return settings;
+	}
+
+	public String toUrlEncoded() {
+		return bytes2String(getUrlEncoder().encode(getPayload()));
+	}
+
+	public byte[] toConnectionPreface() {
+		return combine(fromHexString(Constants.PRE_PREFACE_HEX), asBytes());
 	}
 
 }

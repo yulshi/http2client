@@ -2,10 +2,6 @@ package com.yulong.http2.client.message;
 
 /**
  * An HTTP/2 PUSH request
- * 
- * @author yushi
- * @since Jan. 2016
- *
  */
 public class PushRequest {
 
@@ -60,7 +56,7 @@ public class PushRequest {
 		sb.append("PromisedStreamID=");
 		sb.append(this.promisedStreamId);
 		sb.append("\r\n");
-		return headers.toString();
+		return sb.toString() + headers.toString();
 	}
 
 	@Override

@@ -1,5 +1,6 @@
 package com.yulong.http2.client.frame;
 
+import static com.yulong.http2.client.utils.Utils.showPartOfTextIfTooLong;
 import static com.yulong.http2.client.utils.Utils.toHexString;
 
 public class ContinuationFrame extends Frame implements Continuable {
@@ -43,7 +44,7 @@ public class ContinuationFrame extends Frame implements Continuable {
 
 	@Override
 	public String describePayload() {
-		return "Header-Block-Fragment=" + toHexString(this.headerBlockFragment);
+		return "Header-Block-Fragment=" + showPartOfTextIfTooLong(toHexString(this.headerBlockFragment));
 	}
 
 }

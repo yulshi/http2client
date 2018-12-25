@@ -1,7 +1,7 @@
 package com.yulong.http2.client.frame;
 
-import static com.yulong.http2.client.utils.Utils.createBinaryData;
 import static com.yulong.http2.client.utils.Utils.toHexString;
+import static com.yulong.http2.client.utils.Utils.createBinaryData;
 
 public class PingFrame extends Frame {
 

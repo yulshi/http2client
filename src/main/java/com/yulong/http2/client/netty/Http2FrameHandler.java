@@ -1,35 +1,44 @@
 package com.yulong.http2.client.netty;
 
 import static com.yulong.http2.client.common.Constants.CONNECTION_STREAM_ID;
+import static com.yulong.http2.client.utils.Debug.debugFrame;
+import static com.yulong.http2.client.utils.Debug.debugRequest;
 import static com.yulong.http2.client.utils.LogUtil.log;
+import static com.yulong.http2.client.utils.Utils.bytes2String;
 import static com.yulong.http2.client.utils.Utils.string2Bytes;
 import static com.yulong.http2.client.utils.Utils.toHexString;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import com.twitter.hpack.Decoder;
 import com.twitter.hpack.Encoder;
 import com.twitter.hpack.HeaderListener;
+
+import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelPromise;
+import io.netty.channel.EventLoopGroup;
 import com.yulong.http2.client.Connection;
+import com.yulong.http2.client.ConnectionConfig;
 import com.yulong.http2.client.ConnectionException;
 import com.yulong.http2.client.Http2StartingException;
 import com.yulong.http2.client.Stream;
-import com.yulong.http2.client.StreamException;
 import com.yulong.http2.client.Stream.State;
+import com.yulong.http2.client.StreamException;
 import com.yulong.http2.client.common.ErrorCodeRegistry;
+import com.yulong.http2.client.common.FlowControlWindow;
 import com.yulong.http2.client.common.Http2Settings;
+import com.yulong.http2.client.common.SettingsRegistry;
 import com.yulong.http2.client.frame.Continuable;
 import com.yulong.http2.client.frame.ContinuationFrame;
 import com.yulong.http2.client.frame.DataFrame;
@@ -46,27 +55,19 @@ import com.yulong.http2.client.frame.SettingsFrame;
 import com.yulong.http2.client.frame.WindowUpdateFrame;
 import com.yulong.http2.client.message.Header;
 import com.yulong.http2.client.message.Http2Headers;
-import com.yulong.http2.client.message.Http2Request;
-import com.yulong.http2.client.message.Http2Response;
-import com.yulong.http2.client.utils.Utils;
-
-import io.netty.buffer.Unpooled;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.ChannelPromise;
 
 /**
  * The main class to process the received Frame objects and wrap them into more
  * specific frame types.
- * 
- * @author yushi
- *
  */
 public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements Connection {
 
+	private final String host;
+	private final int port;
+	private final String scheme;
+
 	private ChannelHandlerContext ctx;
-	private final byte[] connectionPreface;
+	private final ConnectionConfig config;
 
 	private ConcurrentHashMap<Integer, NettyStream> streams = new ConcurrentHashMap<>();
 	private final AtomicInteger localCurrentStreamId = new AtomicInteger(3);
@@ -84,7 +85,6 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 
 	private Frame lastReceivedFrame = null;
 	private Frame currentReceivedFrame = null;
-	private final List<FrameHistory> allReceivedFrames;
 
 	// The settings received fromserver
 	private final Http2Settings settingsRequiredByRemote = new Http2Settings();
@@ -95,30 +95,38 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	private Encoder encoder;
 
 	private final NettyStream connectionStream;
+	private final EventLoopGroup eventLoopGroup;
 
-	private boolean sendAcknowledgePrefaceImmediately;
+	private final FlowControlWindow window;
 
-	public Http2FrameHandler(ChannelPromise http2InUsePromise, byte[] connectionPreface) {
+	public Http2FrameHandler(ChannelPromise http2InUsePromise, String host, int port, String scheme,
+			ConnectionConfig config, EventLoopGroup eventLoopGroup) {
+		this.host = host;
+		this.port = port;
+		this.scheme = scheme;
 		this.http2InUsePromise = http2InUsePromise;
-		this.connectionPreface = connectionPreface;
+		this.config = config;
 		generateDecoder();
 		generateEncoder();
-		this.allReceivedFrames = new ArrayList<>();
 		this.connectionStream = new NettyStream(this, CONNECTION_STREAM_ID, State.OPEN);
+		this.eventLoopGroup = eventLoopGroup;
+		this.window = new FlowControlWindow(CONNECTION_STREAM_ID, currentSettings().getInitialWindowSize());
 	}
 
 	@Override
 	public void channelActive(ChannelHandlerContext ctx) throws Exception {
 		this.ctx = ctx;
-		if (connectionPreface != null) {
-			log("Sending connection preface: " + toHexString(connectionPreface));
-			this.ctx.writeAndFlush(Unpooled.copiedBuffer(connectionPreface));
+		if (config.getConnectionPreface() != null) {
+			log("Sending connection preface: " + toHexString(config.getConnectionPreface()));
+			this.ctx.writeAndFlush(Unpooled.copiedBuffer(config.getConnectionPreface()));
 		}
 	}
 
 	@Override
 	public void channelInactive(ChannelHandlerContext ctx) throws Exception {
 		this.closed.compareAndSet(false, true);
+		log("channel is closed from server, disconnecting ...");
+		disconnect();
 	}
 
 	@Override
@@ -213,7 +221,7 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	@Override
 	public void send(Frame frame) throws ConnectionException {
 
-		log(">> " + frame);
+		debugFrame(() -> ">> " + frame);
 
 		if (frame instanceof PingFrame) {
 			this.pingPromise = ctx.newPromise();
@@ -223,24 +231,22 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 			this.settingsPromise = ctx.newPromise();
 		}
 
+		if (frame.getStreamId() > 0) {
+			Stream stream = getStream(frame.getStreamId());
+			if (stream != null && stream.getState() == State.RESET_REMOTE) {
+				throw new ConnectionException(ErrorCodeRegistry.UNKNOWN,
+						"Unable to send frame because the stream is reset by peer: " + stream.resetByPeer());
+			}
+		}
+
 		ChannelFuture f = ctx.writeAndFlush(Unpooled.copiedBuffer(frame.asBytes()));
-		if (!f.awaitUninterruptibly(1L, TimeUnit.SECONDS)) {
-			throw new ConnectionException(ErrorCodeRegistry.UNKNOWN, "Timed out waiting for sending frame");
-		}
-		if (!f.isSuccess()) {
-			throw new ConnectionException(ErrorCodeRegistry.UNKNOWN, "Failed to send frame", f.cause());
-		}
 
-	}
+		f.addListener(future -> {
+			if (!future.isSuccess()) {
+				throw new ConnectionException(ErrorCodeRegistry.UNKNOWN, "Failed to send frame", f.cause());
+			}
+		});
 
-	/**
-	 * Get all the streams on this connection
-	 * 
-	 * @return all the streams on this connection
-	 */
-	@Override
-	public Collection<NettyStream> getStreams() {
-		return Collections.unmodifiableCollection(streams.values());
 	}
 
 	/**
@@ -273,46 +279,6 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	@Override
 	public NettyStream getConnectionStream() {
 		return connectionStream;
-	}
-
-	/**
-	 * Send a HTTP request on the connection
-	 * 
-	 * @param request
-	 * @return A future of Http2Response
-	 * @throws ConnectionException
-	 */
-	@Override
-	public Future<Http2Response> request(Http2Request request) throws ConnectionException {
-
-		final Stream stream = newStream();
-
-		boolean endStreamFlag = true;
-		if (request.getMethod().equalsIgnoreCase("POST") || request.getMethod().equalsIgnoreCase("PUT")) {
-			endStreamFlag = false;
-		}
-
-		byte[] headerBlock = encode(request.headers());
-
-		int maxFragmentSize = 10;
-
-		List<byte[]> fragments = Utils.fragment(headerBlock, maxFragmentSize);
-		if (fragments.size() > 1) {
-			HeadersFrame headersFrame = new HeadersFrame(stream.getId(), endStreamFlag, false, fragments.get(0));
-			stream.headers(headersFrame);
-			for (int i = 1; i < fragments.size() - 1; i++) {
-				ContinuationFrame cf = new ContinuationFrame(stream.getId(), false, fragments.get(i));
-				stream.continuation(cf);
-			}
-			ContinuationFrame cf = new ContinuationFrame(stream.getId(), true, fragments.get(fragments.size() - 1));
-			stream.continuation(cf);
-		} else {
-			HeadersFrame headersFrame = new HeadersFrame(stream.getId(), endStreamFlag, true, headerBlock);
-			stream.headers(headersFrame);
-		}
-
-		return stream.getResponseFuture();
-
 	}
 
 	/**
@@ -375,6 +341,7 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 			} catch (ConnectionException e) {
 				log(e);
 			}
+			log("disconnecting from client ...");
 			disconnect();
 			closed.compareAndSet(false, true);
 		}
@@ -427,12 +394,12 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	public Http2Headers decode(byte[] headerBlock) throws ConnectionException {
 
 		try (ByteArrayInputStream in = new ByteArrayInputStream(headerBlock)) {
-			final Http2Headers headers = new Http2Headers();
+			final Http2Headers headers = new Http2Headers(this);
 
 			decoder.decode(in, new HeaderListener() {
 				@Override
 				public void addHeader(byte[] key, byte[] value, boolean sensitive) {
-					headers.add(Utils.bytes2String(key), Utils.bytes2String(value));
+					headers.add(bytes2String(key), new String(value));
 				}
 			});
 
@@ -454,11 +421,13 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	@Override
 	public byte[] encode(Http2Headers headers) {
 
+		debugRequest(headers);
+
 		try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
 			for (Header header : headers.all()) {
 				String headerName = header.getName().toLowerCase();
 				boolean sensitive = headerName.matches("(cookie|set-cookie|sensitive-).*");
-				encoder.encodeHeader(out, string2Bytes(headerName), string2Bytes(header.getValue()), sensitive);
+				encoder.encodeHeader(out, string2Bytes(headerName), header.getValue().getBytes(), sensitive);
 			}
 			return out.toByteArray();
 		} catch (IOException e) {
@@ -478,31 +447,6 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	}
 
 	/**
-	 * Close all streams in the "idle" state that might have been initiated by
-	 * that peer with a lower-valued stream identifier.
-	 * 
-	 * @param streamId
-	 */
-	public void closeUnusedIdleStreams(int streamId) {
-		for (NettyStream stream : this.streams.values()) {
-			if (stream.getId() < streamId && stream.getState() == State.IDLE) {
-				stream.setState(State.CLOSED);
-			}
-		}
-	}
-
-	/**
-	 * Get all the received frames on the connection (excludes those whose
-	 * stream id is not 0)
-	 * 
-	 * @return
-	 */
-	@Override
-	public List<FrameHistory> allReceivedFrames() {
-		return Collections.unmodifiableList(allReceivedFrames);
-	}
-
-	/**
 	 * If this connection has been closed by peer, return the GOAWAY frame.
 	 * 
 	 * @return GoAwayFrame
@@ -510,6 +454,35 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	@Override
 	public GoAwayFrame closedByPeer() {
 		return lastReceivedGoAwayFrame.get();
+	}
+
+	/**
+	 * The host name the connection is connecting to
+	 * 
+	 * @return
+	 */
+	@Override
+	public String getHost() {
+		return host;
+	}
+
+	/**
+	 * The port number the connection is connecting to
+	 * @return
+	 */
+	@Override
+	public int getPort() {
+		return port;
+	}
+
+	/**
+	 * The scheme the connection is using
+	 * 
+	 * @return
+	 */
+	@Override
+	public String getScheme() {
+		return scheme;
 	}
 
 	/**
@@ -528,10 +501,6 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 		}
 	}
 
-	public void setSendAcknowledgePrefaceImmediately(boolean sendAcknowledgePrefaceImmediately) {
-		this.sendAcknowledgePrefaceImmediately = sendAcknowledgePrefaceImmediately;
-	}
-
 	/**
 	 * Pre-process the received frame
 	 * 
@@ -539,7 +508,7 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	 */
 	private void preprocess(Frame frame) {
 
-		log("<< " + frame);
+		debugFrame(() -> "<< " + frame);
 
 		if (currentReceivedFrame == null) {
 			lastReceivedFrame = currentReceivedFrame = frame;
@@ -548,7 +517,10 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 			currentReceivedFrame = frame;
 		}
 
-		allReceivedFrames.add(new FrameHistory(currentReceivedFrame));
+		for (Consumer<FrameHistory> consumer : config.getFrameConsumers()) {
+			consumer.accept(new FrameHistory(currentReceivedFrame));
+		}
+
 		int streamId = currentReceivedFrame.getStreamId();
 		if (streamId != 0) {
 			NettyStream stream = (NettyStream) getStream(streamId);
@@ -583,10 +555,21 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 			}
 			// If it's not a reply, send back a reply:
 			settingsRequiredByRemote.setFrom(settingsFrame);
+
+			// Resize the window size:
+			Integer newWindowSize = settingsFrame.getSettings().get(SettingsRegistry.INITIAL_WINDOW_SIZE);
+			if (newWindowSize != null) {
+				for (NettyStream stream : streams.values()) {
+					if (stream.getState() != State.CLOSED) {
+						stream.getWindow().resize(newWindowSize);
+					}
+				}
+			}
+
 			// the connection state is changed:
 			generateDecoder();
 
-			if (sendAcknowledgePrefaceImmediately) {
+			if (config.isSendAcknowledgePrefaceImmediately()) {
 				send(SettingsFrame.REPLY);
 			}
 
@@ -634,6 +617,7 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 		if (headersFrame.getStreamId() == 1) {
 			NettyStream stream = (NettyStream) getStream(1);
 			stream.setState(State.HALF_CLOSED_LOCAL);
+			stream.addDefaultDataFrameConsumer();
 			this.streams.putIfAbsent(1, stream);
 		}
 
@@ -758,6 +742,8 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 		int promisedStreamId = pushPromiseFrame.getPromisedStreamId();
 
 		NettyStream promisedStream = new NettyStream(this, promisedStreamId);
+		promisedStream.addDefaultDataFrameConsumer();
+
 		if (streams.putIfAbsent(promisedStreamId, promisedStream) == null) {
 			promisedStream.setState(State.RESERVED_REMOTE);
 		} else {
@@ -785,7 +771,6 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 
 		WindowUpdateFrame windowUpdateFrame = (WindowUpdateFrame) currentReceivedFrame;
 
-		// TODO validation on WINDOW_UPDATE frame
 		validatePayloadLength(WindowUpdateFrame.PAYLOAD_LENGTH);
 
 		int streamId = windowUpdateFrame.getStreamId();
@@ -796,7 +781,9 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 						"The flow-control window increment should not be 0 or negative: "
 								+ windowUpdateFrame.getWindowSizeIncrement());
 			}
-			// TODO process WINDOW_UPDATE frame on the connection
+			if (!window.increment(windowUpdateFrame.getWindowSizeIncrement())) {
+				goAway(ErrorCodeRegistry.FLOW_CONTROL_ERROR, "The window size exceeds the max value");
+			}
 		} else {
 			// To a specific stream:
 			NettyStream stream = streams.get(streamId);
@@ -866,8 +853,8 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	}
 
 	private void disconnect() {
-		log("Disconnecting ...");
-		ctx.close();
+		this.ctx.channel().close();
+		this.eventLoopGroup.shutdownGracefully();
 	}
 
 	private void generateEncoder() {
@@ -877,6 +864,32 @@ public class Http2FrameHandler extends ChannelInboundHandlerAdapter implements C
 	private void generateDecoder() {
 		decoder = new Decoder(settingsRequiredByRemote.getMaxHeaderListSize(),
 				settingsRequiredByRemote.getHeaderTableSize());
+	}
+
+	FlowControlWindow getWindow() {
+		return window;
+	}
+
+	ConcurrentHashMap<Integer, NettyStream> streams() {
+		return streams;
+	}
+
+	/**
+	 * Close all streams in the "idle" state that might have been initiated by
+	 * that peer with a lower-valued stream identifier.
+	 * 
+	 * @param streamId
+	 */
+	void closeUnusedIdleStreams(int streamId) {
+		for (NettyStream stream : this.streams.values()) {
+			if (stream.getId() < streamId && stream.getState() == State.IDLE) {
+				stream.setState(State.CLOSED);
+			}
+		}
+	}
+
+	ConnectionConfig config() {
+		return config;
 	}
 
 }

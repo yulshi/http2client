@@ -3,10 +3,10 @@ package com.yulong.http2.client.frame;
 import static com.yulong.http2.client.frame.FrameType.HEADERS;
 import static com.yulong.http2.client.utils.Utils.combine;
 import static com.yulong.http2.client.utils.Utils.createBinaryData;
+import static com.yulong.http2.client.utils.Utils.showPartOfTextIfTooLong;
+import static com.yulong.http2.client.utils.Utils.toHexString;
 
 import java.nio.ByteBuffer;
-
-import com.yulong.http2.client.utils.Utils;
 
 public class HeadersFrame extends Frame implements Continuable, Padded {
 
@@ -136,17 +136,18 @@ public class HeadersFrame extends Frame implements Continuable, Padded {
 			if (priorityFrame != null) {
 				describe.append(priorityFrame.describePayload()).append(keyValSep);
 			}
-			describe.append("Header-Block-Fragment=" + Utils.toHexString(getHeaderBlockFragment())).append(keyValSep);
-			describe.append("Padding=" + Utils.toHexString(getPadding()));
+			describe.append("Header-Block-Fragment=" + showPartOfTextIfTooLong(toHexString(getHeaderBlockFragment())));
+			describe.append(keyValSep);
+			describe.append("Padding=" + showPartOfTextIfTooLong(toHexString(getPadding())));
 			return describe.toString();
 		} else {
 			if (priorityFrame != null) {
 				StringBuilder describe = new StringBuilder();
 				describe.append(priorityFrame.describePayload()).append(keyValSep);
-				describe.append("Header-Block-Fragment=" + Utils.toHexString(getHeaderBlockFragment()));
+				describe.append("Header-Block-Fragment=" + showPartOfTextIfTooLong(toHexString(getHeaderBlockFragment())));
 				return describe.toString();
 			} else {
-				return "Header-Block-Fragment=" + Utils.toHexString(getHeaderBlockFragment());
+				return "Header-Block-Fragment=" + showPartOfTextIfTooLong(toHexString(getHeaderBlockFragment()));
 			}
 		}
 

@@ -1,29 +1,26 @@
 package com.yulong.http2.client.netty;
 
+import static com.yulong.http2.client.utils.Debug.debugOctet;
 import static com.yulong.http2.client.utils.LogUtil.log;
 import static com.yulong.http2.client.utils.Utils.toInt;
 
 import java.util.List;
 
-import com.yulong.http2.client.ConnectionException;
-import com.yulong.http2.client.frame.Frame;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.ByteToMessageDecoder;
+import com.yulong.http2.client.ConnectionException;
+import com.yulong.http2.client.frame.Frame;
 
 /**
  * Decode the received bytes into Frame object
- * 
- * @author yushi
- *
  */
 public class Http2FrameDecoder extends ByteToMessageDecoder {
 
 	@Override
 	protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws ConnectionException {
 
-		//log(in);
+		debugOctet(in);
 
 		if (in.readableBytes() < 9) {
 			return;
